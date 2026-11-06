@@ -20,6 +20,7 @@ from speculators.cli.regenerate_responses import (
     _sample_from_response,
     _validate_dataset,
     _worker,
+    assert_output_is_appendable,
     build_boundary_sample,
     extract_conversation,
     extract_tools,
@@ -328,6 +329,46 @@ def test_resume_roundtrip_hash_only_row(tmp_path):
     )
 
     assert primary_id in load_seen(str(out))
+
+
+def test_append_guard_rejects_non_empty_output_without_resume(tmp_path):
+    # The default output name is stable and rows are appended, so a second run
+    # without --resume would write a duplicate copy of every conversation.
+    out = tmp_path / "out.jsonl"
+    out.write_text(json.dumps({"id": "P"}) + "\n", encoding="utf-8")
+
+    with pytest.raises(typer.BadParameter, match="--resume"):
+        assert_output_is_appendable(str(out), resume=False)
+
+
+def test_append_guard_allows_non_empty_output_with_resume(tmp_path):
+    out = tmp_path / "out.jsonl"
+    out.write_text(json.dumps({"id": "P"}) + "\n", encoding="utf-8")
+
+    assert_output_is_appendable(str(out), resume=True)
+
+
+@pytest.mark.parametrize("resume", [True, False])
+def test_append_guard_allows_missing_output(tmp_path, resume):
+    assert_output_is_appendable(str(tmp_path / "nope.jsonl"), resume=resume)
+
+
+@pytest.mark.parametrize("resume", [True, False])
+def test_append_guard_allows_empty_output(tmp_path, resume):
+    # An empty file has nothing to duplicate; a previous run that created the
+    # file and wrote nothing must not block a retry.
+    out = tmp_path / "out.jsonl"
+    out.touch()
+
+    assert_output_is_appendable(str(out), resume=resume)
+
+
+def test_append_guard_allows_directory_named_like_output(tmp_path):
+    # is_file() keeps the guard from tripping on a non-file path.
+    target = tmp_path / "out.jsonl"
+    target.mkdir()
+
+    assert_output_is_appendable(str(target), resume=False)
 
 
 # ---------------------------------------------------------------------------
