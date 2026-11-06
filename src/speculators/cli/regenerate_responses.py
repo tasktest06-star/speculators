@@ -531,6 +531,11 @@ def _log_summary(stats: dict[str, Any]) -> None:
         f"({stats['ok']} ok, {stats['errors']} errors, "
         f"{stats['truncated']} truncated)"
     )
+    if stats.get("resumed"):
+        typer.echo(
+            f"Output file now holds {stats['resumed'] + stats['ok']} conversations "
+            f"({stats['resumed']} carried over from earlier runs)"
+        )
     if stats["requests"] > 0:
         rps = stats["requests"] / elapsed if elapsed > 0 else 0
         tps = int(stats["completion_tokens"] / elapsed) if elapsed > 0 else 0
@@ -546,6 +551,41 @@ def sanitize_filename(name: str) -> str:
     name = re.sub(r'[/\\:*?"<>|]', "_", name)
     name = name.replace(" ", "_")
     return name.strip("._")
+
+
+def progress_postfix(stats: dict[str, Any]) -> dict[str, Any]:
+    """Build the progress-bar postfix from the live run counters.
+
+    ``ok``/``err``/``trunc`` count this run only. ``resumed`` is shown when the
+    run picked up an existing output file, so the bar's position can be read
+    against what was already done rather than looking like a fresh start.
+    """
+    postfix: dict[str, Any] = {
+        "ok": stats["ok"],
+        "err": stats["errors"],
+        "trunc": stats["truncated"],
+    }
+    if stats.get("resumed"):
+        postfix["resumed"] = stats["resumed"]
+    elapsed = time.perf_counter() - stats["start_time"]
+    if elapsed > 0 and stats["requests"] > 0:
+        postfix["rps"] = f"{stats['requests'] / elapsed:.1f}"
+        postfix["tps"] = f"{stats['completion_tokens'] / elapsed:.0f}"
+    return postfix
+
+
+def resume_progress_bounds(limit: int | None, resumed: int) -> tuple[int, int | None]:
+    """Return the tqdm ``initial`` and ``total`` for a possibly resumed run.
+
+    ``--limit`` budgets the conversations this run will *newly* process, so a
+    resumed run's overall target is that budget plus what the output file
+    already holds. Starting the bar at ``resumed`` keeps it at the run's true
+    position instead of counting up from zero again, which reads as a lost
+    resume. Without ``--limit`` the overall total is unknown (the input is
+    streamed), so only the offset is reported.
+    """
+    total = None if limit is None else limit + resumed
+    return resumed, total
 
 
 def ensure_parent_dirs(*paths: str) -> None:
@@ -648,16 +688,7 @@ async def _worker(
             err_fh.flush()
             stats["errors"] += 1
         finally:
-            elapsed = time.perf_counter() - stats["start_time"]
-            postfix = {
-                "ok": stats["ok"],
-                "err": stats["errors"],
-                "trunc": stats["truncated"],
-            }
-            if elapsed > 0 and stats["requests"] > 0:
-                postfix["rps"] = f"{stats['requests'] / elapsed:.1f}"
-                postfix["tps"] = f"{stats['completion_tokens'] / elapsed:.0f}"
-            progress.set_postfix(postfix, refresh=False)
+            progress.set_postfix(progress_postfix(stats), refresh=False)
             progress.update(1)
             queue.task_done()
 
@@ -748,6 +779,9 @@ async def _run(  # noqa: C901
     typer.echo()
 
     seen_ids = load_seen(outfile) if resume else set()
+    if seen_ids:
+        typer.echo(f"Resuming: {len(seen_ids)} conversations already in {outfile}")
+    progress_initial, progress_total = resume_progress_bounds(limit, len(seen_ids))
 
     queue: asyncio.Queue = asyncio.Queue(maxsize=concurrency * 4)
 
@@ -769,7 +803,8 @@ async def _run(  # noqa: C901
             Path(outfile).open("a", encoding="utf-8") as output_file,  # noqa: ASYNC230
             Path(error_outfile).open("a", encoding="utf-8") as error_file,  # noqa: ASYNC230
             tqdm(
-                total=limit,
+                total=progress_total,
+                initial=progress_initial,
                 desc="Generating responses",
                 unit="sample",
                 dynamic_ncols=True,
@@ -783,6 +818,9 @@ async def _run(  # noqa: C901
                 "completion_tokens": 0,
                 "total_request_s": 0.0,
                 "start_time": time.perf_counter(),
+                # Conversations carried over from a previous run. Reported
+                # separately so the per-run counters stay honest.
+                "resumed": len(seen_ids),
             }
             workers = [
                 asyncio.create_task(
