@@ -827,6 +827,82 @@ def test_regenerate_plain_conversation_is_unchanged_and_sends_no_tools():
     assert "tools" not in sent[0]
 
 
+# --- --max-tokens caps the generation, not the context ---
+
+
+def _two_turn_item():
+    return {
+        "idx": 0,
+        "primary_id": "u",
+        "turns": [
+            {"role": "user", "content": "first"},
+            {"role": "user", "content": "second"},
+        ],
+    }
+
+
+def test_long_prompt_with_completed_reply_continues_to_next_turn():
+    # The prompt alone exceeds --max-tokens, but each reply finished cleanly, so
+    # both user turns must be requested.
+    item = _two_turn_item()
+    responses = [
+        _response(prompt_token_ids=list(range(50)), token_ids=[1, 2], content="a"),
+        _response(prompt_token_ids=list(range(60)), token_ids=[3, 4], content="b"),
+    ]
+    samples, truncated, sent = _regen(item, responses, max_tokens=8)
+
+    assert not truncated
+    assert len(sent) == 2
+    assert len(samples) == 2
+
+
+def test_small_max_tokens_does_not_truncate_a_completed_reply():
+    # A user capping reply length with --max-tokens 2 still gets every turn, as
+    # long as the server reports the replies as complete.
+    item = _two_turn_item()
+    responses = [
+        _response(prompt_token_ids=[1], token_ids=[2], content="a"),
+        _response(prompt_token_ids=[1, 2, 3], token_ids=[4], content="b"),
+    ]
+    samples, truncated, sent = _regen(item, responses, max_tokens=2)
+
+    assert not truncated
+    assert len(sent) == 2
+    assert len(samples) == 2
+
+
+def test_finish_reason_length_truncates_the_conversation():
+    # A reply the server actually cut off still stops the conversation.
+    item = _two_turn_item()
+    responses = [
+        _response(
+            prompt_token_ids=[1],
+            token_ids=[2, 3],
+            content="cut off",
+            finish="length",
+        ),
+    ]
+    samples, truncated, sent = _regen(item, responses, max_tokens=64)
+
+    assert truncated
+    assert len(sent) == 1
+    assert len(samples) == 1
+
+
+def test_completion_reaching_max_tokens_truncates_the_conversation():
+    # Some servers omit finish_reason=length; a completion that reached the cap
+    # is treated as cut off too.
+    item = _two_turn_item()
+    responses = [
+        _response(prompt_token_ids=[1], token_ids=[2, 3, 4], content="cut off"),
+    ]
+    samples, truncated, sent = _regen(item, responses, max_tokens=3)
+
+    assert truncated
+    assert len(sent) == 1
+    assert len(samples) == 1
+
+
 def test_regenerate_splices_cached_result_after_regenerated_call():
     item = {
         "idx": 1,
