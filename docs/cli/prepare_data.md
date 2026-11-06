@@ -66,6 +66,8 @@ speculators prepare-data \
 
 - **`--overwrite`** (flag) Forcibly rerun preprocessing and overwrite existing content in output directory.
 
+  Without this flag, an output directory that already holds a *complete* dataset is left alone and the command exits successfully, so re-running a finished pipeline is cheap. "Complete" means both `dataset_info.json` and `state.json` are present: `save_to_disk` writes the `.arrow` shards first and the metadata last, so a save that was killed partway leaves shards that `load_from_disk` cannot read. That case exits non-zero and asks for `--overwrite`, rather than silently skipping the render work and failing later at load time.
+
 - **`--allow-empty-output`** (flag) Allow writing an empty preprocessed dataset. By default raises when normalization or filtering removes every sample.
 
 ### Processing Arguments
