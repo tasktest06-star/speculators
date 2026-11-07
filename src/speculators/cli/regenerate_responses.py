@@ -548,6 +548,31 @@ def sanitize_filename(name: str) -> str:
     return name.strip("._")
 
 
+def assert_output_is_appendable(outfile: str, resume: bool) -> None:
+    """Refuse to append a second copy of the rows onto a finished output file.
+
+    The default output name is derived from the dataset and model, so it is
+    stable across runs, and rows are always appended. Without this check, re-running
+    the same command doubles every conversation in the file that ``prepare-data``
+    later trains on. ``--resume`` is the supported way to add to an existing file:
+    it skips the ids already present (see :func:`load_seen`).
+
+    An empty or missing file is fine -- there is nothing to duplicate.
+    """
+    if resume:
+        return
+
+    path = Path(outfile)
+    if path.is_file() and path.stat().st_size > 0:
+        raise typer.BadParameter(
+            f"output file already exists and is not empty: {outfile}. "
+            "Pass --resume to skip the conversations it already contains and "
+            "append only new ones, or delete the file to regenerate from "
+            "scratch. Appending without --resume would write a second copy of "
+            "every conversation."
+        )
+
+
 def ensure_parent_dirs(*paths: str) -> None:
     """Create parent directories for output files.
 
@@ -746,6 +771,8 @@ async def _run(  # noqa: C901
     typer.echo(f"Output file: {outfile}")
     typer.echo(f"Error file: {error_outfile}")
     typer.echo()
+
+    assert_output_is_appendable(outfile, resume)
 
     seen_ids = load_seen(outfile) if resume else set()
 

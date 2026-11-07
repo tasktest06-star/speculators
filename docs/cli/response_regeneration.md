@@ -137,6 +137,8 @@ Column names such as `instruction`, `question`, and `text` are not inferred. Con
 
 - **`--resume`** (flag) Skip conversations already present in the output file (matched by `primary_id`: the row's `id`/`uuid` if it has one, otherwise a content hash).
 
+  `--resume` is the only supported way to add to an existing output file. Rows are appended, and the auto-generated name is the same on every run, so a second run without `--resume` would write a duplicate copy of every conversation and `prepare-data` would then train on the duplicates. The command therefore refuses to start when the output file already exists and is non-empty unless `--resume` is passed; delete the file to regenerate from scratch. A missing or empty file starts normally either way.
+
 ### Full Example
 
 ```bash
