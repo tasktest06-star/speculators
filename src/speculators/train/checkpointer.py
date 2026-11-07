@@ -164,6 +164,17 @@ class BaseCheckpointer:
 
     TRAIN_COMMAND_FILENAME = "train_command.txt"
 
+    # Reproducibility artifacts written once at the checkpoint root by the train
+    # command (see speculators.train.config.artifacts.save). They describe the run
+    # rather than any single epoch, so --save-best must not sweep them away.
+    ROOT_PROVENANCE_FILENAMES = frozenset(
+        {
+            TRAIN_COMMAND_FILENAME,
+            "run.yaml",
+            "speculators.patch",
+        }
+    )
+
     def _copy_train_command(self, epoch: int | str) -> None:
         src = self.path / self.TRAIN_COMMAND_FILENAME
         if src.exists():
@@ -230,6 +241,10 @@ class BaseCheckpointer:
     def cleanup_keep_only_best(self, best_epoch: int) -> None:
         """
         Delete all epoch dir. except best_epoch, and keep best_checkpoint symlink.
+
+        Root-level reproducibility artifacts (``ROOT_PROVENANCE_FILENAMES``) are
+        kept: they belong to the run, not to an epoch, and deleting them would
+        leave the surviving checkpoint without the config that produced it.
         """
         keep_dir = self.path / str(best_epoch)
         best_link = self.best_path()
@@ -237,8 +252,6 @@ class BaseCheckpointer:
         # Safety checks
         if not keep_dir.exists() or not keep_dir.is_dir():
             raise FileNotFoundError(f"Best epoch dir does not exist: {keep_dir}")
-
-        train_cmd_file = self.path / self.TRAIN_COMMAND_FILENAME
 
         for child in self.path.iterdir():
             # Keep the symlink itself
@@ -249,7 +262,7 @@ class BaseCheckpointer:
             if child == keep_dir:
                 continue
 
-            if child == train_cmd_file:
+            if child.is_file() and child.name in self.ROOT_PROVENANCE_FILENAMES:
                 continue
 
             # Delete numbered epoch directories and any other stray dirs/files

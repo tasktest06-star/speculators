@@ -49,6 +49,45 @@ def test_previous_epoch_ignores_checkpoint_best(tmp_path: Path):
     assert cp.previous_epoch == 2
 
 
+def test_cleanup_keep_only_best_keeps_root_provenance(tmp_path: Path):
+    """--save-best must not delete the run's reproducibility artifacts."""
+    for epoch in ("0", "1", "2"):
+        (tmp_path / epoch).mkdir()
+    (tmp_path / "run.yaml").write_text("train:\n  lr: 0.001\n")
+    (tmp_path / "train_command.txt").write_text("speculators train ...\n")
+    (tmp_path / "speculators.patch").write_text("# repo: /src (abc123)\n")
+    (tmp_path / "stray.bin").write_bytes(b"not provenance")
+
+    cp = SingleGPUCheckpointer(str(tmp_path))
+    cp.update_best_symlink(1)
+    cp.cleanup_keep_only_best(best_epoch=1)
+
+    # run.yaml must still reload the run, and the patch must still be recoverable.
+    assert (tmp_path / "run.yaml").read_text() == "train:\n  lr: 0.001\n"
+    assert (tmp_path / "train_command.txt").is_file()
+    assert (tmp_path / "speculators.patch").is_file()
+
+    # Non-best epochs and unrelated files are still cleaned up.
+    remaining = {p.name for p in tmp_path.iterdir() if p.is_dir() and p.name.isdigit()}
+    assert remaining == {"1"}
+    assert not (tmp_path / "stray.bin").exists()
+    assert (tmp_path / "checkpoint_best").is_symlink()
+
+
+def test_cleanup_keep_only_best_does_not_keep_provenance_named_directory(
+    tmp_path: Path,
+):
+    """The allowlist covers files; a directory of that name is still an epoch stray."""
+    (tmp_path / "0").mkdir()
+    (tmp_path / "run.yaml").mkdir()
+
+    cp = SingleGPUCheckpointer(str(tmp_path))
+    cp.update_best_symlink(0)
+    cp.cleanup_keep_only_best(best_epoch=0)
+
+    assert not (tmp_path / "run.yaml").exists()
+
+
 def test_update_best_symlink_creates_and_updates(tmp_path: Path):
     (tmp_path / "1").mkdir()
     (tmp_path / "3").mkdir()
