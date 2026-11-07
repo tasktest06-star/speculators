@@ -13,6 +13,7 @@ Speculators provides a comprehensive framework for:
 ## Quick Links
 
 - [Getting Started](getting_started.md) - Start here if you're new to Speculators
+- [Concepts](concepts.md) - How speculative decoding works and what the metrics and tensors mean
 - [Features](features.md) - Detailed documentation on core features
 - [Loss Functions](loss_functions.md) - Training losses available via `--loss-fn`
 - [Algorithms](algorithms/index.md) - Overview of supported algorithms

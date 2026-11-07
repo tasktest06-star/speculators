@@ -3,6 +3,7 @@ nav:
     - User Guide:
           - user_guide/index.md
           - Getting Started: user_guide/getting_started.md
+          - Concepts: user_guide/concepts.md
           - Features: user_guide/features.md
           - Loss Functions: user_guide/loss_functions.md
           - Hyperparameter Selection:

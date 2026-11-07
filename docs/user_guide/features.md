@@ -8,7 +8,7 @@ Speculators supports multi-GPU training via PyTorch Fully Sharded Data Parallel 
 
 ## Draft Vocabulary Support
 
-Draft models use a reduced vocabulary for faster inference. Speculators automatically builds vocabulary mappings (`t2d` and `d2t` tensors) from token frequency statistics collected during data preparation, selecting the most frequent tokens for the draft vocab. Pre-built mappings can also be provided manually.
+Draft models use a reduced vocabulary for faster inference. Speculators automatically builds vocabulary mappings (`t2d` and `d2t` tensors) from token frequency statistics collected during data preparation, selecting the most frequent tokens for the draft vocab. Pre-built mappings can also be provided manually. See [Concepts](concepts.md#the-draft-vocabulary-t2d-and-d2t) for what the two tensors mean and the invariant they have to satisfy.
 
 ## Multi-Backend Metric Logging
 
@@ -24,7 +24,7 @@ Both [Eagle-3](algorithms/eagle3.md) and [DFlash](algorithms/dflash.md) models u
 
 ## Efficient Sequence Packing
 
-The multipack batch sampler uses an LPT (Longest Processing Time First) bin-packing algorithm to pack variable-length sequences into batches, maximizing GPU utilization while respecting per-device token limits. This avoids the wasted compute from naive padding.
+The multipack batch sampler uses an LPT (Longest Processing Time First) bin-packing algorithm to pack variable-length sequences into batches, maximizing GPU utilization while respecting per-device token limits. This avoids the wasted compute from naive padding. Packed positions are tracked by a `document_ids` tensor so attention never crosses a document boundary; see [Concepts](concepts.md#sequence-packing-and-document_ids).
 
 ## Checkpoint Resume
 
