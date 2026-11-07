@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import time
 import warnings
 from collections.abc import Callable
@@ -790,7 +791,20 @@ class Trainer:
     def maybe_update_best(self, epoch: int, val_metrics: dict | None):
         if val_metrics is None or "loss_epoch" not in val_metrics:
             return
-        if val_metrics["loss_epoch"] >= self.best_val_loss:
+
+        loss_epoch = val_metrics["loss_epoch"]
+        # A NaN loss compares False against every float, so `>= best_val_loss`
+        # would not reject it and the diverged epoch would become the best one --
+        # and, under --save-best, the only one left on disk. Infinities cannot
+        # improve on the initial best either, so neither is a candidate.
+        if not math.isfinite(loss_epoch):
+            root_logger.warning(
+                f"Skipping checkpoint_best update for epoch {epoch}: "
+                f"loss_epoch is not finite ({loss_epoch})"
+            )
+            return
+
+        if loss_epoch >= self.best_val_loss:
             return
 
         if self.config.save_best:
@@ -805,7 +819,7 @@ class Trainer:
         ):
             return
 
-        self.best_val_loss = val_metrics["loss_epoch"]
+        self.best_val_loss = loss_epoch
         self.checkpointer.save_val_metrics(epoch, val_metrics)
         self.checkpointer.update_best_symlink(epoch)
         root_logger.info(

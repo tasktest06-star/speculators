@@ -211,6 +211,77 @@ def test_checkpoint_freq_flag_controls_saves(
     assert best_path.resolve() == (tmp_path / "5").resolve()
 
 
+@pytest.mark.parametrize("bad_loss", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_val_loss_never_becomes_best(tmp_path: Path, bad_loss: float):
+    """A non-finite validation loss must not be accepted as the new best."""
+    case_dir = tmp_path / f"case_{bad_loss}"
+    case_dir.mkdir()
+    trainer = _make_minimal_trainer(case_dir, checkpoint_freq=1, save_best=False)
+    trainer.best_val_loss = 0.5
+    (case_dir / "0").mkdir()
+    trainer.checkpointer.update_best_symlink(0)
+
+    trainer.maybe_update_best(1, {"loss_epoch": bad_loss})
+
+    assert trainer.best_val_loss == pytest.approx(0.5)
+    assert trainer.checkpointer.read_best_epoch() == 0
+
+
+def test_non_finite_val_loss_does_not_block_later_improvement(tmp_path: Path):
+    """After a NaN epoch, a genuinely better finite loss still becomes best."""
+    trainer = _make_minimal_trainer(tmp_path, checkpoint_freq=1, save_best=False)
+    for epoch in (0, 1, 2):
+        (tmp_path / str(epoch)).mkdir()
+
+    trainer.maybe_update_best(0, {"loss_epoch": 0.8})
+    assert trainer.best_val_loss == pytest.approx(0.8)
+
+    # A diverged epoch is ignored and leaves best_val_loss on the last finite value.
+    trainer.maybe_update_best(1, {"loss_epoch": float("nan")})
+    assert trainer.best_val_loss == pytest.approx(0.8)
+    assert trainer.checkpointer.read_best_epoch() == 0
+
+    # The comparison is still against 0.8, not NaN, so 0.9 is not an improvement.
+    trainer.maybe_update_best(2, {"loss_epoch": 0.9})
+    assert trainer.checkpointer.read_best_epoch() == 0
+
+    trainer.maybe_update_best(2, {"loss_epoch": 0.3})
+    assert trainer.best_val_loss == pytest.approx(0.3)
+    assert trainer.checkpointer.read_best_epoch() == 2
+
+
+def test_save_best_keeps_last_finite_best_when_val_loss_diverges(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """--save-best must not delete the good epoch in favour of a NaN one."""
+    trainer = _make_minimal_trainer(tmp_path, checkpoint_freq=1, save_best=True)
+    trainer.config = trainer.config._replace(num_epochs=3)
+
+    # Epoch 1 diverges; epoch 2 recovers but is worse than epoch 0.
+    val_losses = {0: 0.4, 1: float("nan"), 2: 0.6}
+    trainer.train_epoch = lambda _epoch: None
+    trainer.val_epoch = lambda epoch: {"loss_epoch": val_losses[epoch]}
+
+    def fake_cp_save_checkpoint(_model, _opt, epoch: int):
+        (tmp_path / str(epoch)).mkdir(exist_ok=True)
+
+    monkeypatch.setattr(
+        trainer.checkpointer, "save_checkpoint", fake_cp_save_checkpoint
+    )
+    monkeypatch.setattr(
+        trainer.checkpointer,
+        "save_scheduler_state_dict",
+        lambda *_args, **_kwargs: None,
+    )
+
+    trainer.run_training()
+
+    assert trainer.best_val_loss == pytest.approx(0.4)
+    assert trainer.checkpointer.read_best_epoch() == 0
+    remaining = {p.name for p in tmp_path.iterdir() if p.is_dir() and p.name.isdigit()}
+    assert remaining == {"0"}
+
+
 def test_save_and_load_val_metrics(tmp_path: Path):
     cp = SingleGPUCheckpointer(str(tmp_path))
 
