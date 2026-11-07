@@ -487,10 +487,18 @@ async def regenerate_conversation(
             samples.append(sample)
             prefix.append(assistant_msg)
 
-            prompt_token_ids = data.get("prompt_token_ids")
-            completion_token_ids = data["choices"][0].get("token_ids")
-            total_tokens = len(prompt_token_ids or []) + len(completion_token_ids or [])
-            if total_tokens > max_tokens:
+            # ``max_tokens`` caps the *generation*, not the context. Comparing it
+            # against prompt + completion would truncate a conversation whose
+            # prompt is simply long, or any conversation at all when the user
+            # lowers --max-tokens to cap reply length. Only a reply the server
+            # actually cut off ends the conversation here; a short, completed
+            # reply after a long prompt continues to the next turn.
+            choice = data["choices"][0]
+            completion_token_ids = choice.get("token_ids")
+            if (
+                choice.get("finish_reason") == "length"
+                or len(completion_token_ids or []) >= max_tokens
+            ):
                 truncated = True
                 break
 

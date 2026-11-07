@@ -127,6 +127,8 @@ Column names such as `instruction`, `question`, and `text` are not inferred. Con
 
 - **`--max-tokens`** (int, default: `8192`) Max tokens for generation.
 
+  This is the per-reply generation cap sent to the endpoint, not a context budget: it bounds how long each regenerated reply may be, and says nothing about how long the prompt may be. A multi-turn conversation stops early only when a reply was genuinely cut off — the endpoint returned `finish_reason="length"`, or the completion hit the cap — so a short, completed reply after a long prompt continues to the next turn. Conversations that stop this way keep the rows completed so far and are counted in the `trunc` field of the progress bar.
+
 - **`--sampling-params`** (str, default: `None`) JSON object merged into each chat-completion request, e.g. `'{"temperature": 0.6, "top_p": 0.95, "seed": 0}'`. Unset keys use the server defaults.
 
 - **`--max-retries`** (int, default: `3`) Max retry attempts per request on transient HTTP failures (408, 409, 425, 429, 5xx) with exponential backoff. Permanent errors (e.g., 400, 404) fail immediately.
