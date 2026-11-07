@@ -3,6 +3,23 @@
 import torch
 
 
+def _spans_one_document(
+    document_ids: torch.Tensor, target_idx: torch.Tensor, depth: int
+) -> torch.Tensor:
+    """Mask of chains whose anchor and target sit in the same real document.
+
+    A chain supervised at ``target_idx`` is anchored ``depth`` positions back, so
+    it conditions on everything in between. Documents are packed contiguously and
+    padding is marked ``-1``, so matching endpoints means the whole chain stays
+    inside one real document; a chain that straddles a boundary would condition
+    on another document's tokens.
+    """
+    doc_ids = document_ids.reshape(-1)
+    target_doc = doc_ids[target_idx]
+    anchor_doc = doc_ids[target_idx - depth]
+    return (target_doc == anchor_doc) & (target_doc != -1)
+
+
 def generate_cod_sample_indices(
     seq_length: int,
     loss_mask: torch.Tensor,
@@ -11,6 +28,7 @@ def generate_cod_sample_indices(
     down_sample_ratio_min: float = 0.2,
     filter_position_zero: bool = True,
     max_anchors: int | None = None,
+    document_ids: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Generate sampling indices for parallel sequences using COD sampling.
@@ -26,6 +44,10 @@ def generate_cod_sample_indices(
         down_sample_ratio: Geometric decay ratio r in (0,1)
         down_sample_ratio_min: Minimum retention ratio floor
         filter_position_zero: Whether to filter out position 0 from candidates
+        max_anchors: Cap on the chains carried past depth 0
+        document_ids: Maps each position to its document index, -1 for padding
+            [seq_len] or [1, seq_len]. When given, a chain is kept only if its
+            anchor and its supervised position lie in the same real document.
 
     Returns:
         Tuple of:
@@ -65,8 +87,21 @@ def generate_cod_sample_indices(
         else:
             sampled_idx = prev_indices
 
-        # Build candidate pool for next depth: shift by +1 (next-token targets),
-        next_candidates = (sampled_idx + 1) % seq_length
+        # A depth-d chain is anchored d positions back, so a supervised index
+        # below d would store a negative anchor. The attention mask indexes
+        # document_ids with it, and a negative index silently wraps to the end
+        # of the sequence -- i.e. to another document.
+        sampled_idx = sampled_idx[sampled_idx >= d]
+        if document_ids is not None:
+            sampled_idx = sampled_idx[_spans_one_document(document_ids, sampled_idx, d)]
+        if sampled_idx.numel() == 0:
+            break
+
+        # Build candidate pool for next depth: shift by +1 (next-token targets).
+        # No modulo: wrapping past the end would restart the chain at position 0,
+        # which in a packed batch belongs to a different document.
+        next_candidates = sampled_idx + 1
+        next_candidates = next_candidates[next_candidates < seq_length]
         if filter_position_zero:
             next_candidates = next_candidates[next_candidates != 0]
         mask = torch.isin(next_candidates, all_valid_indices)
