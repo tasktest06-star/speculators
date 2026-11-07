@@ -8,13 +8,174 @@ Tests cover:
 - Validation of the conversion process
 """
 
+import logging
 from unittest.mock import patch
 
 import pytest
 import torch
+from safetensors.torch import load_file
 
 from speculators.convert.eagle.eagle3_converter import Eagle3Converter
 from speculators.convert.utils import load_checkpoint_config
+
+# A tiny but complete Eagle-3 source checkpoint: small enough to build in-process,
+# shaped so every Eagle3Speculator parameter has a supplier.
+_H, _I, _V, _DV = 64, 128, 256, 32
+_HEADS, _KV_HEADS = 4, 2
+_KV_DIM = (_H // _HEADS) * _KV_HEADS
+
+_TINY_EAGLE_CONFIG = {
+    "target_vocab_size": _V,
+    "hidden_size": _H,
+    "intermediate_size": _I,
+    "num_attention_heads": _HEADS,
+    "num_key_value_heads": _KV_HEADS,
+    "hidden_act": "silu",
+    "max_position_embeddings": 128,
+    "initializer_range": 0.02,
+    "rms_norm_eps": 1e-6,
+    "attention_bias": False,
+    "rope_theta": 10000.0,
+    "mlp_bias": False,
+    "draft_vocab_size": _DV,
+}
+
+_TINY_VERIFIER_CONFIG = {
+    "architectures": ["LlamaForCausalLM"],
+    "max_position_embeddings": 512,
+    "rope_theta": 500000.0,
+    "vocab_size": _V,
+}
+
+
+def _tiny_eagle3_weights() -> dict[str, torch.Tensor]:
+    """Source-side weights, in the legacy ``midlayer.*`` naming the converter remaps."""
+    return {
+        "embed_tokens.weight": torch.randn(_V, _H),
+        "fc.weight": torch.randn(_H, 3 * _H),
+        # q/k/v read the embedding concatenated with the projected hidden state,
+        # so their input dimension is 2 * hidden_size.
+        "midlayer.self_attn.q_proj.weight": torch.randn(_H, 2 * _H),
+        "midlayer.self_attn.k_proj.weight": torch.randn(_KV_DIM, 2 * _H),
+        "midlayer.self_attn.v_proj.weight": torch.randn(_KV_DIM, 2 * _H),
+        "midlayer.self_attn.o_proj.weight": torch.randn(_H, _H),
+        "midlayer.mlp.gate_proj.weight": torch.randn(_I, _H),
+        "midlayer.mlp.up_proj.weight": torch.randn(_I, _H),
+        "midlayer.mlp.down_proj.weight": torch.randn(_H, _I),
+        "midlayer.input_layernorm.weight": torch.randn(_H),
+        "midlayer.hidden_norm.weight": torch.randn(_H),
+        "midlayer.post_attention_layernorm.weight": torch.randn(_H),
+        "norm.weight": torch.randn(_H),
+        "lm_head.weight": torch.randn(_DV, _H),
+        "t2d": torch.zeros(_V, dtype=torch.bool),
+        "d2t": torch.zeros(_DV, dtype=torch.long),
+    }
+
+
+def _save_tiny_checkpoint(weights: dict[str, torch.Tensor], output_dir):
+    """Run ``_save_converted_checkpoint`` for the tiny checkpoint above."""
+    converter = Eagle3Converter()
+    with patch(
+        "speculators.convert.eagle.eagle3_converter.PretrainedConfig.get_config_dict",
+        return_value=(_TINY_VERIFIER_CONFIG, None),
+    ):
+        config = converter._build_eagle3_speculator_config(
+            dict(_TINY_EAGLE_CONFIG), "base/model"
+        )
+        return converter._save_converted_checkpoint(
+            config,
+            weights,
+            output_dir,
+            reduce_vocab_size="t2d" in weights,
+            has_drafter_embedding="embed_tokens.weight" in weights,
+        )
+
+
+class TestEagle3ConverterKeyMismatch:
+    """A key mismatch must fail the conversion, not warn and save noise."""
+
+    @pytest.mark.sanity
+    def test_complete_checkpoint_converts_and_preserves_weights(self, tmp_path):
+        """The baseline: a complete checkpoint still converts, with real weights."""
+        weights = _tiny_eagle3_weights()
+        saved = _save_tiny_checkpoint(weights, tmp_path / "out")
+
+        written = load_file(saved / "model.safetensors")
+        # midlayer.* landed as layers.0.*, carrying the source values.
+        assert torch.allclose(
+            written["layers.0.self_attn.q_proj.weight"],
+            weights["midlayer.self_attn.q_proj.weight"],
+        )
+        assert torch.allclose(written["norm.weight"], weights["norm.weight"])
+
+    @pytest.mark.sanity
+    def test_renamed_weight_key_raises(self, tmp_path):
+        """The shape of the #360 regression: a lost remap must not save silently.
+
+        Renaming a key leaves the destination parameter unsupplied, so the
+        missing-key check is what catches it.
+        """
+        weights = _tiny_eagle3_weights()
+        weights["midlayer.input_layernorm_RENAMED.weight"] = weights.pop(
+            "midlayer.input_layernorm.weight"
+        )
+
+        with pytest.raises(ValueError, match="random initialization") as excinfo:
+            _save_tiny_checkpoint(weights, tmp_path / "out")
+
+        assert "layers.0.input_layernorm.weight" in str(excinfo.value)
+        assert not (tmp_path / "out" / "model.safetensors").exists()
+
+    @pytest.mark.sanity
+    def test_extra_layer_weights_warn_but_still_convert(self, tmp_path, caplog):
+        """Eagle3Speculator builds one layer, so extra layers have no destination.
+
+        Those weights are dropped rather than written, which the caller needs to
+        be told about -- but it is not the random-weight hazard, so it is not fatal.
+        """
+        weights = _tiny_eagle3_weights()
+        weights["midlayer_1.self_attn.q_proj.weight"] = torch.randn(_H, _H)
+
+        with caplog.at_level(logging.WARNING):
+            saved = _save_tiny_checkpoint(weights, tmp_path / "out")
+
+        written = load_file(saved / "model.safetensors")
+        assert "midlayer_1.self_attn.q_proj.weight" not in written
+
+    @pytest.mark.sanity
+    def test_missing_weight_key_raises(self, tmp_path):
+        """A parameter with no supplier would be written at random init."""
+        weights = _tiny_eagle3_weights()
+        del weights["midlayer.mlp.down_proj.weight"]
+
+        with pytest.raises(ValueError, match="random initialization"):
+            _save_tiny_checkpoint(weights, tmp_path / "out")
+
+        assert not (tmp_path / "out" / "model.safetensors").exists()
+
+    @pytest.mark.sanity
+    def test_absent_d2t_buffer_still_converts(self, tmp_path):
+        """d2t is zero-initialized, not random, so its absence is not fatal."""
+        weights = _tiny_eagle3_weights()
+        del weights["d2t"]
+
+        saved = _save_tiny_checkpoint(weights, tmp_path / "out")
+
+        written = load_file(saved / "model.safetensors")
+        assert torch.equal(written["d2t"], torch.zeros(_DV, dtype=torch.long))
+
+    @pytest.mark.sanity
+    def test_checkpoint_without_vocab_mapping_converts(self, tmp_path):
+        """No t2d means no vocab-map buffers are registered at all."""
+        weights = _tiny_eagle3_weights()
+        del weights["t2d"]
+        del weights["d2t"]
+
+        saved = _save_tiny_checkpoint(weights, tmp_path / "out")
+
+        written = load_file(saved / "model.safetensors")
+        assert "t2d" not in written
+        assert "d2t" not in written
 
 
 class TestEagle3ConverterFixes:

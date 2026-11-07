@@ -23,6 +23,13 @@ from speculators.convert.utils import (
 from speculators.models.eagle3 import Eagle3SpeculatorConfig
 from speculators.proposals.greedy import GreedyTokenProposalConfig
 
+# The vocab-mapping buffers are zero-initialized rather than randomly
+# initialized, and are registered only when the checkpoint supplies ``t2d``, so
+# their absence is recoverable instead of silently poisoning the weights. Every
+# other state-dict entry is a parameter: one the checkpoint does not supply stays
+# at its random initialization and is written to disk as noise.
+_ZERO_INITIALIZED_BUFFER_KEYS = frozenset({"d2t", "t2d"})
+
 
 class Eagle3Converter:
     """
@@ -216,11 +223,40 @@ class Eagle3Converter:
             remapped_weights, strict=False
         )  # type: ignore[attr-defined]
 
+        # A missing parameter used to be only a warning, and the conversion saved
+        # anyway: the tensor written to disk was the model's random
+        # initialization. The result converted cleanly, loaded cleanly, and only
+        # showed up as near-zero acceptance at evaluation time -- the failure
+        # behind #358/#360, where a dropped midlayer -> layer.0 remap produced
+        # exactly this. A dropped remap also renames a key, so the correlated
+        # missing key catches it. The MTP and DFlash converters already treat a
+        # missing draft weight as fatal.
+        critical_missing = [
+            key for key in missing_keys if key not in _ZERO_INITIALIZED_BUFFER_KEYS
+        ]
+        if critical_missing:
+            raise ValueError(
+                "Draft weights missing from the checkpoint; saving would write "
+                "them at their random initialization, which converts and loads "
+                "cleanly and only shows up as near-zero acceptance during "
+                f"evaluation. Missing keys: {sorted(critical_missing)}"
+            )
+
         if missing_keys:
-            logger.warning(f"Missing keys in checkpoint: {missing_keys}")
+            logger.warning(
+                "Vocab-mapping buffers absent from the checkpoint and left "
+                f"zero-initialized: {sorted(missing_keys)}"
+            )
 
         if unexpected_keys:
-            logger.warning(f"Unexpected keys in checkpoint: {unexpected_keys}")
+            # Not fatal: Eagle3Speculator builds a single decoder layer, so a
+            # multi-layer source checkpoint legitimately reports its extra
+            # layers here -- and those weights are dropped from the output.
+            logger.warning(
+                "Checkpoint keys with no destination in Eagle3Speculator; these "
+                f"weights are NOT written to the converted model: "
+                f"{sorted(unexpected_keys)}"
+            )
 
         tl_config = config.transformer_layer_config
         # transformers 5 keeps ``torch_dtype`` only as a deprecated alias.
