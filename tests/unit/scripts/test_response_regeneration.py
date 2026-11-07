@@ -26,7 +26,9 @@ from speculators.cli.regenerate_responses import (
     load_input_dataset,
     load_seen,
     prepare_row,
+    progress_postfix,
     regenerate_conversation,
+    resume_progress_bounds,
 )
 from speculators.data_generation import vllm_client
 from speculators.data_generation.configs import DATASET_CONFIGS, DatasetConfig
@@ -506,6 +508,60 @@ def _run_worker(responses, tmp_path, stem):
     ):
         stats = asyncio.run(scenario(out_fh, err_fh))
     return stats, out_path, err_path
+
+
+def _stats(**overrides):
+    base = {
+        "ok": 0,
+        "errors": 0,
+        "truncated": 0,
+        "requests": 0,
+        "completion_tokens": 0,
+        "total_request_s": 0.0,
+        "start_time": time.perf_counter(),
+    }
+    base.update(overrides)
+    return base
+
+
+def test_resume_progress_bounds_offsets_the_bar_by_work_already_done():
+    # --limit budgets this run's *new* conversations, so the overall target is
+    # that budget on top of what the output file already holds.
+    assert resume_progress_bounds(limit=1000, resumed=10720) == (10720, 11720)
+
+
+def test_resume_progress_bounds_without_resume_is_unchanged():
+    assert resume_progress_bounds(limit=1000, resumed=0) == (0, 1000)
+
+
+def test_resume_progress_bounds_without_limit_has_no_total():
+    # The input is streamed, so with no --limit the overall total is unknowable;
+    # only the resume offset can be reported.
+    assert resume_progress_bounds(limit=None, resumed=25) == (25, None)
+    assert resume_progress_bounds(limit=None, resumed=0) == (0, None)
+
+
+def test_progress_postfix_reports_resumed_count():
+    postfix = progress_postfix(_stats(ok=3, errors=1, truncated=2, resumed=10720))
+
+    assert postfix["ok"] == 3
+    assert postfix["err"] == 1
+    assert postfix["trunc"] == 2
+    assert postfix["resumed"] == 10720
+
+
+def test_progress_postfix_omits_resumed_when_not_resuming():
+    # A fresh run's bar is unchanged -- no stray field.
+    assert "resumed" not in progress_postfix(_stats(ok=3))
+    assert "resumed" not in progress_postfix(_stats(ok=3, resumed=0))
+
+
+def test_progress_postfix_adds_rates_once_requests_have_landed():
+    assert "rps" not in progress_postfix(_stats(requests=0))
+
+    postfix = progress_postfix(_stats(requests=10, completion_tokens=500))
+    assert "rps" in postfix
+    assert "tps" in postfix
 
 
 def test_worker_row_identity_and_all_or_nothing_writes(tmp_path):

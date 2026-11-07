@@ -137,6 +137,15 @@ Column names such as `instruction`, `question`, and `text` are not inferred. Con
 
 - **`--resume`** (flag) Skip conversations already present in the output file (matched by `primary_id`: the row's `id`/`uuid` if it has one, otherwise a content hash).
 
+  A resumed run starts the progress bar at the number of conversations the output file already holds, rather than from zero, and adds a `resumed=` field to the bar:
+
+  ```text
+  Resuming: 10720 conversations already in magpie_Llama-3.3-70B-Instruct.jsonl
+  Generating responses:  92%|▉| 10725/11720 [...] ok=5, err=0, trunc=523, resumed=10720
+  ```
+
+  `ok`, `err`, and `trunc` count only the current run; `resumed` is the carry-over. Because `--limit` budgets the conversations a run will *newly* process, the bar's total is `--limit` plus the carry-over. With no `--limit` the input is streamed and the overall total is unknown, so only the offset is shown.
+
 ### Full Example
 
 ```bash
