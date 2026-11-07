@@ -45,11 +45,25 @@ from speculators.data_generation.preprocessing import (
 log = PipelineLogger(__name__)
 
 
+# Written by ``Dataset.save_to_disk`` *after* the ``.arrow`` shards, so their
+# presence is what marks a save as finished.
+DATASET_METADATA_FILENAMES = ("dataset_info.json", "state.json")
+
 PREPARE_DATA_OVERWRITE_ALLOWED_FILES = {
-    "dataset_info.json",
-    "state.json",
+    *DATASET_METADATA_FILENAMES,
     "token_freq.pt",
 }
+
+
+def is_complete_dataset_dir(output: Path) -> bool:
+    """Whether *output* holds a dataset that finished writing.
+
+    ``Dataset.save_to_disk`` writes the ``.arrow`` shards before
+    ``dataset_info.json`` and ``state.json``, so an interrupted save leaves
+    shards with no metadata. ``load_from_disk`` requires the metadata, so arrow
+    files alone do not mean the render work can be skipped.
+    """
+    return all((output / name).is_file() for name in DATASET_METADATA_FILENAMES)
 
 
 def assert_safe_to_overwrite(output: Path, token_freq_path: Path) -> None:
@@ -206,6 +220,20 @@ def prepare_data(
 
     if output_path.exists():
         if not overwrite and list(output_path.glob("*.arrow")):
+            if not is_complete_dataset_dir(output_path):
+                missing = [
+                    name
+                    for name in DATASET_METADATA_FILENAMES
+                    if not (output_path / name).is_file()
+                ]
+                log.error(
+                    f"Output directory {output_path} holds .arrow shards but is "
+                    f"missing {', '.join(missing)}, so a previous save did not "
+                    "finish and the dataset cannot be loaded. Re-run with "
+                    "--overwrite to redo preprocessing, or point --output "
+                    "somewhere else."
+                )
+                raise typer.Exit(code=1)
             log.warning(
                 "Dataset files already exist in output directory, skipping "
                 "preprocessing. To overwrite existing files use --overwrite."

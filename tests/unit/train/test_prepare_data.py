@@ -1,9 +1,15 @@
+import logging
 from pathlib import Path
 
 import pytest
 from datasets import Dataset as HFDataset
+from typer.testing import CliRunner
 
-from speculators.cli.prepare_data import assert_safe_to_overwrite
+from speculators.cli import app
+from speculators.cli.prepare_data import (
+    assert_safe_to_overwrite,
+    is_complete_dataset_dir,
+)
 from speculators.data_generation import preprocessing as preprocessing_module
 from speculators.data_generation.preprocessing import load_and_preprocess_dataset
 
@@ -36,6 +42,76 @@ def test_assert_safe_to_overwrite_honors_custom_token_freq_path(tmp_path: Path):
     token_freq_path.touch()
 
     assert_safe_to_overwrite(output, token_freq_path)
+
+
+def _write_shard(output: Path) -> None:
+    (output / "data-00000-of-00001.arrow").touch()
+
+
+def test_is_complete_dataset_dir_requires_both_metadata_files(tmp_path: Path):
+    output = tmp_path / "data"
+    output.mkdir()
+    _write_shard(output)
+    assert not is_complete_dataset_dir(output)
+
+    (output / "dataset_info.json").touch()
+    assert not is_complete_dataset_dir(output)
+
+    (output / "state.json").touch()
+    assert is_complete_dataset_dir(output)
+
+
+def test_is_complete_dataset_dir_rejects_metadata_directories(tmp_path: Path):
+    output = tmp_path / "data"
+    output.mkdir()
+    (output / "dataset_info.json").mkdir()
+    (output / "state.json").touch()
+
+    assert not is_complete_dataset_dir(output)
+
+
+def _invoke_prepare_data(output: Path):
+    return CliRunner().invoke(
+        app,
+        [
+            "prepare-data",
+            "--model",
+            "unused/model",
+            "--data",
+            "unused.jsonl",
+            "--output",
+            str(output),
+        ],
+    )
+
+
+def test_prepare_data_rejects_partial_dataset_dir(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    """Arrow shards with no metadata are an interrupted save, not a finished one."""
+    output = tmp_path / "data"
+    output.mkdir()
+    _write_shard(output)
+
+    with caplog.at_level(logging.ERROR, logger="speculators.cli.prepare_data"):
+        result = _invoke_prepare_data(output)
+
+    assert result.exit_code == 1
+    assert "--overwrite" in caplog.text
+    assert "dataset_info.json" in caplog.text
+
+
+def test_prepare_data_skips_complete_dataset_dir(tmp_path: Path):
+    """A fully written dataset directory still short-circuits with exit code 0."""
+    output = tmp_path / "data"
+    output.mkdir()
+    _write_shard(output)
+    (output / "dataset_info.json").touch()
+    (output / "state.json").touch()
+
+    result = _invoke_prepare_data(output)
+
+    assert result.exit_code == 0
 
 
 class _FakeProcessor:
